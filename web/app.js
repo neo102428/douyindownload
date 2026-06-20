@@ -10,6 +10,9 @@ const els = {
   notesBox: document.getElementById("notesBox"),
   outputDir: document.getElementById("outputDir"),
   manifestPath: document.getElementById("manifestPath"),
+  authorFields: document.getElementById("authorFields"),
+  authorUrl: document.getElementById("authorUrl"),
+  authorMaxItems: document.getElementById("authorMaxItems"),
   browserName: document.getElementById("browserName"),
   browserProfile: document.getElementById("browserProfile"),
   retries: document.getElementById("retries"),
@@ -42,9 +45,23 @@ const MODE_CONTENT = {
       "适合抖音图文作品、图集作品、单张动图或多张动图连在一起的作品。这个模式会先抓图片 / 动图资源，再尽量额外生成一个 MP4。",
     notes: [
       "1. 这个模式直接吃抖音分享页或分享文案，不需要你手动提取直链。",
-      "2. 如果作品里有单张动图或多张动图资源，会优先保存原资源，并尽量合成或转成 MP4。",
-      "3. 如果作品里只有静态图，也会额外生成一个幻灯片 MP4，方便预览或二次整理。",
-      "4. 配乐能拿到时会单独保存；预览 MP4 生成失败时，原始图片 / 动图文件仍然会保留。",
+      "2. 静态图会优先尝试无水印图片源；如果你是为了刷新以前下过的旧文件，再手动勾选“覆盖同名文件”。",
+      "3. 默认会识别已经下载过的同一作品，并跳过重复下载。",
+      "4. 如果作品里有单张动图或多张动图资源，会优先保存原资源，并尽量合成或转成 MP4。",
+      "5. 如果作品里只有静态图，也会额外生成一个幻灯片 MP4，方便预览或二次整理。",
+      "6. 配乐能拿到时会单独保存；预览 MP4 生成失败时，原始图片 / 动图文件仍然会保留。",
+    ].join("\n"),
+  },
+  douyin_author_auto: {
+    notice:
+      "适合直接贴某个抖音作者主页链接。程序会先抓作者作品列表，再自动识别每条作品是视频还是图文 / 动图，并分流到对应下载器。",
+    notes: [
+      "1. 这个模式不需要你手工整理单条作品链接，直接填写作者主页链接或作者分享短链即可。",
+      "2. 作品列表接口通常更依赖登录态，建议优先选择你已经登录抖音网页版的浏览器 Cookie。",
+      "3. 同一个作者主页批量抓取时，程序会优先按作品 ID 去重，并记住断点，下次会从上次停下的位置继续。",
+      "4. 图文 / 动图作品会走抖音图文模式；普通视频作品会走 yt-dlp 视频模式。",
+      "5. 如果作者列表接口漏掉一部分作品，程序会尝试从作者主页本身回补作品 ID；首次启用这一步时，可能会弹出浏览器页面。",
+      "6. 如果你只想刷新某个作者以前下过的旧文件，再手动勾选“覆盖同名文件”。",
     ].join("\n"),
   },
   image: {
@@ -65,6 +82,8 @@ function payloadFromForm() {
     download_mode: els.downloadMode.value,
     output_dir: els.outputDir.value,
     manifest_path: els.manifestPath.value,
+    author_url: els.authorUrl.value,
+    author_max_items: Number(els.authorMaxItems.value || 50),
     browser_name: els.browserName.value,
     browser_profile: els.browserProfile.value,
     retries: Number(els.retries.value || 3),
@@ -123,6 +142,8 @@ function renderState(snapshot) {
   els.statusText.textContent = snapshot.status || "就绪";
   if (snapshot.running && snapshot.download_mode) {
     els.downloadMode.value = snapshot.download_mode;
+    els.authorUrl.value = snapshot.author_url;
+    els.authorMaxItems.value = snapshot.author_max_items;
   }
   updateProgress(snapshot.current || 0, snapshot.total || 0);
   els.logText.value = (snapshot.logs || []).join("\n");
@@ -178,6 +199,7 @@ function renderModeUi(runtime, mode, selectedBrowser) {
   const content = MODE_CONTENT[mode] || MODE_CONTENT.video;
   els.modeNotice.textContent = content.notice;
   els.notesBox.value = content.notes;
+  els.authorFields.style.display = mode === "douyin_author_auto" ? "grid" : "none";
   renderBrowserOptions(runtime, mode, selectedBrowser);
 }
 
@@ -187,6 +209,8 @@ async function loadDefaults() {
   els.downloadMode.value = defaults.download_mode || "video";
   els.outputDir.value = defaults.output_dir || "";
   els.manifestPath.value = defaults.manifest_path || "";
+  els.authorUrl.value = defaults.author_url || "";
+  els.authorMaxItems.value = defaults.author_max_items || 50;
   els.browserProfile.value = defaults.browser_profile || "";
   els.retries.value = defaults.retries || 3;
   els.timeout.value = defaults.timeout || 60;

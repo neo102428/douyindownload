@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import csv
+import datetime
 import hashlib
 import json
 import mimetypes
@@ -49,6 +50,7 @@ MANIFEST_FIELDS = [
     "path",
     "dir",
     "id",
+    "publish_time",
     "title",
     "kind",
     "image_count",
@@ -76,6 +78,26 @@ IMAGE_HINTS = (
     "download",
     "display",
 )
+WATERMARK_HINTS = (
+    "download",
+    "watermark",
+    "logo",
+)
+WATERMARK_URL_HINTS = (
+    "logo_type=",
+    "aweme_search_suffix",
+    "watermark",
+    "logo",
+)
+PREFERRED_MOTION_HINTS = (
+    "play_addr_h264",
+    "play_h264",
+    "play_addr",
+    "play_url",
+    "play",
+    "origin",
+    "original",
+)
 EXTENSION_MAP = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
@@ -92,6 +114,7 @@ EXTENSION_MAP = {
     "audio/x-m4a": ".m4a",
     "audio/aac": ".aac",
 }
+ITEM_META_NAME = ".douyin_item.json"
 
 
 def runtime_info():
@@ -142,12 +165,17 @@ def _emit(callback, event, index, total, payload):
 
 def _friendly_error_message(message):
     text = str(message or "").strip()
+    lowered = text.lower()
     if "failed to load cookies" in text or "Operation not permitted" in text:
         return (
             "读取浏览器 Cookie 失败。macOS 可能拦住了浏览器 Cookie 文件访问。"
             "你可以先改成“不读取浏览器 Cookie”再试；"
             "如果必须用登录态，再考虑给当前终端或应用补系统权限。"
         )
+    if any(token in lowered for token in ("aweme_detail", "empty response", "空响应", "filter_reason")):
+        return f"图文/实况下载失败：详情接口没有返回作品数据，可能需要登录态、作品已删或链接已失效。{text}"
+    if any(token in lowered for token in ("403", "401", "cookie", "login", "forbidden")):
+        return f"图文/实况下载失败：可能需要已登录浏览器 Cookie。{text}"
     return text
 
 
@@ -290,6 +318,16 @@ def _detail_title(detail, aweme_id):
     return title.strip() or f"douyin_{aweme_id}"
 
 
+def _detail_publish_time(detail):
+    value = detail.get("create_time")
+    if value in (None, ""):
+        return ""
+    try:
+        return datetime.datetime.fromtimestamp(int(value)).strftime("%Y-%m-%d_%H-%M-%S")
+    except (TypeError, ValueError, OSError, OverflowError):
+        return ""
+
+
 def _detail_kind(detail):
     aweme_type = detail.get("aweme_type")
     if any(detail.get(name) for name in IMAGE_FIELDS):
@@ -297,6 +335,10 @@ def _detail_kind(detail):
     if detail.get("video"):
         return f"video_aweme_type_{aweme_type}"
     return f"unknown_aweme_type_{aweme_type}"
+
+
+def _legacy_folder_name(aweme_id, title):
+    return f"{aweme_id}_{safe_name(title)[:80]}"
 
 
 def _flatten_entries(value):
@@ -369,20 +411,37 @@ def _collect_url_groups(value, trail=()):
 
 def _score_group(path_text, urls, *, motion):
     score = 0
+    url_text = " ".join(urls).lower()
     if motion:
+        if any(hint in path_text for hint in PREFERRED_MOTION_HINTS):
+            score += 180
+        if any(hint in url_text for hint in PREFERRED_MOTION_HINTS):
+            score += 90
         if any(hint in path_text for hint in MOTION_HINTS):
             score += 120
         if any(url.split("?", 1)[0].lower().endswith((".mp4", ".mov", ".webm", ".mkv")) for url in urls):
             score += 80
         if any(hint in path_text for hint in IMAGE_HINTS):
             score -= 60
+        if any(hint in path_text for hint in WATERMARK_HINTS):
+            score -= 180
+        if any(hint in url_text for hint in WATERMARK_URL_HINTS):
+            score -= 260
+        if "download" in path_text:
+            score -= 140
     else:
         if any(hint in path_text for hint in IMAGE_HINTS):
             score += 90
         if "url_list" in path_text:
             score += 20
+        if "url_list" in path_text and "download" not in path_text:
+            score += 80
         if any(hint in path_text for hint in ("origin", "original")):
             score += 40
+        if any(hint in path_text for hint in ("display", "play")):
+            score += 25
+        if any(hint in path_text for hint in WATERMARK_HINTS):
+            score -= 80
         if any(hint in path_text for hint in MOTION_HINTS):
             score -= 220
     return score
@@ -393,8 +452,6 @@ def _rank_entry_urls(entry, *, motion):
     for trail, urls in _collect_url_groups(entry):
         path_text = ".".join(trail).lower()
         score = _score_group(path_text, urls, motion=motion)
-        if motion and score <= 0:
-            continue
         if not motion and score <= 0:
             continue
         unique_urls = []
@@ -405,6 +462,10 @@ def _rank_entry_urls(entry, *, motion):
                 seen.add(url)
         candidates.append((score, path_text, unique_urls))
     candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    if motion:
+        positive = [item for item in candidates if item[0] > 0]
+        if positive:
+            return [item[2] for item in positive] + [item[2] for item in candidates if item[0] <= 0]
     return [item[2] for item in candidates]
 
 
@@ -594,8 +655,74 @@ def _build_slideshow(image_paths, output_path, ffmpeg_path, audio_path=None):
     return output_path
 
 
-def _make_output_dir(output_dir, aweme_id, title):
-    folder_name = f"{aweme_id}_{safe_name(title)[:80]}"
+def _item_meta_path(item_dir):
+    return Path(item_dir) / ITEM_META_NAME
+
+
+def _write_item_meta(item_dir, row):
+    meta = {
+        "aweme_id": row.get("id", ""),
+        "publish_time": row.get("publish_time", ""),
+        "title": row.get("title", ""),
+        "kind": row.get("kind", ""),
+        "dir": str(item_dir),
+    }
+    _item_meta_path(item_dir).write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _load_existing_index(output_dir):
+    index = {}
+    root = Path(output_dir)
+    if not root.exists():
+        return index
+
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+
+        meta_path = _item_meta_path(child)
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                meta = {}
+            aweme_id = str(meta.get("aweme_id") or "").strip()
+            if aweme_id:
+                index.setdefault(aweme_id, child)
+                continue
+
+        match = re.match(r"^(?P<id>[0-9]{8,24})_", child.name)
+        if match:
+            index.setdefault(match.group("id"), child)
+    return index
+
+
+def _looks_downloaded_dir(path):
+    path = Path(path)
+    expected_paths = (
+        path / "images",
+        path / "motion",
+        path / "audio",
+        path / "preview_motion.mp4",
+        path / "preview_motion_merged.mp4",
+        path / "preview_slideshow.mp4",
+        _item_meta_path(path),
+    )
+    return any(item.exists() for item in expected_paths)
+
+
+def _make_output_dir(output_dir, aweme_id, publish_time, title):
+    parts = []
+    if publish_time:
+        parts.append(publish_time)
+    if title and title != f"douyin_{aweme_id}":
+        parts.append(safe_name(title)[:80])
+    if not parts:
+        parts.append(aweme_id)
+    folder_name = "_".join(parts)
     target = Path(output_dir) / folder_name
     target.mkdir(parents=True, exist_ok=True)
     return target
@@ -608,6 +735,7 @@ def _new_row(url):
         "path": "",
         "dir": "",
         "id": "",
+        "publish_time": "",
         "title": "",
         "kind": "",
         "image_count": 0,
@@ -626,20 +754,32 @@ def _run_single_url(
     retries,
     timeout,
     overwrite,
+    existing_index,
     progress_callback,
     index,
     total,
+    *,
+    emit_start=True,
 ):
     row = _new_row(url)
-    _emit(progress_callback, "start", index, total, {"url": url})
+    if emit_start:
+        _emit(progress_callback, "start", index, total, {"url": url})
     _emit(progress_callback, "item_progress", index, total, {"message": "正在解析分享链接"})
 
     opener = _build_opener(browser_name, browser_profile)
     final_url, aweme_id, _link_kind = _resolve_final_url(opener, url, timeout)
     row["id"] = aweme_id
+    existing_dir = existing_index.get(aweme_id)
+    if existing_dir and not overwrite:
+        row["status"] = "skipped"
+        row["dir"] = str(existing_dir)
+        row["note"] = "该作品已下载过，已跳过重复下载。"
+        _emit(progress_callback, "finish", index, total, row)
+        return row
 
     _emit(progress_callback, "item_progress", index, total, {"message": "正在读取作品详情"})
     detail = _fetch_detail(opener, aweme_id, timeout)
+    row["publish_time"] = _detail_publish_time(detail)
     row["title"] = _detail_title(detail, aweme_id)
     row["kind"] = _detail_kind(detail)
 
@@ -650,8 +790,23 @@ def _run_single_url(
         _emit(progress_callback, "finish", index, total, row)
         return row
 
-    item_dir = _make_output_dir(output_dir, aweme_id, row["title"])
+    item_dir = _make_output_dir(output_dir, aweme_id, row["publish_time"], row["title"])
     row["dir"] = str(item_dir)
+    if not overwrite:
+        legacy_dir = Path(output_dir) / _legacy_folder_name(aweme_id, row["title"])
+        if _looks_downloaded_dir(item_dir):
+            existing_index.setdefault(aweme_id, item_dir)
+            row["status"] = "skipped"
+            row["note"] = "该作品已下载过，已跳过重复下载。"
+            _emit(progress_callback, "finish", index, total, row)
+            return row
+        if legacy_dir != item_dir and _looks_downloaded_dir(legacy_dir):
+            existing_index.setdefault(aweme_id, legacy_dir)
+            row["dir"] = str(legacy_dir)
+            row["status"] = "skipped"
+            row["note"] = "该作品已下载过，已跳过重复下载。"
+            _emit(progress_callback, "finish", index, total, row)
+            return row
 
     image_paths = []
     motion_paths = []
@@ -750,6 +905,8 @@ def _run_single_url(
         f"{len(motion_paths)} 个动图资源。"
         + (" 已生成 MP4。" if video_path else "")
     )
+    _write_item_meta(item_dir, row)
+    existing_index[aweme_id] = item_dir
     _emit(progress_callback, "finish", index, total, row)
     return row
 
@@ -771,6 +928,7 @@ def run_note_batch(
 
     output_dir = str(Path(output_dir))
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    existing_index = _load_existing_index(output_dir)
 
     rows = []
     total = len(urls)
@@ -784,6 +942,7 @@ def run_note_batch(
                 retries=retries,
                 timeout=timeout,
                 overwrite=overwrite,
+                existing_index=existing_index,
                 progress_callback=progress_callback,
                 index=index,
                 total=total,

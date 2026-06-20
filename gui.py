@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from socket import socket
 
+from douyin_author_batch import run_author_batch, runtime_info as author_runtime_info
 from douyin_gallerydl import run_image_batch, runtime_info as image_runtime_info
 from douyin_note import run_note_batch, runtime_info as note_runtime_info
 from douyin_ytdlp import parse_share_text, run_share_batch, runtime_info as video_runtime_info
@@ -26,6 +27,7 @@ def runtime_info():
         "video": video_runtime_info(),
         "tiktok_image": image_runtime_info(),
         "douyin_media": note_runtime_info(),
+        "douyin_author_auto": author_runtime_info(),
     }
 
 
@@ -46,6 +48,8 @@ class DownloadState:
         self.last_error = ""
         self.output_dir = str(DEFAULT_OUTPUT_DIR)
         self.manifest_path = str(DEFAULT_MANIFEST_PATH)
+        self.author_url = ""
+        self.author_max_items = 50
 
     def defaults(self):
         urls_text = ""
@@ -59,6 +63,8 @@ class DownloadState:
             "retries": 3,
             "timeout": 60,
             "overwrite": False,
+            "author_url": "",
+            "author_max_items": 50,
             "browser_name": "none",
             "browser_profile": "",
             "runtime": runtime_info(),
@@ -78,6 +84,8 @@ class DownloadState:
                 "output_dir": self.output_dir,
                 "manifest_path": self.manifest_path,
                 "download_mode": getattr(self, "download_mode", "video"),
+                "author_url": self.author_url,
+                "author_max_items": self.author_max_items,
                 "runtime": runtime_info(),
             }
 
@@ -85,23 +93,29 @@ class DownloadState:
         DEFAULT_URLS_PATH.write_text(urls_text, encoding="utf-8")
 
     def start(self, payload):
+        download_mode = str(payload.get("download_mode", "video")).strip() or "video"
         urls_text = str(payload.get("urls_text", ""))
         urls = parse_share_text(urls_text)
-        if not urls:
+        author_url = str(payload.get("author_url", "")).strip()
+        author_max_items = max(1, int(payload.get("author_max_items", 50)))
+
+        if download_mode == "douyin_author_auto":
+            if not author_url:
+                raise ValueError("请先输入抖音作者主页链接或作者分享链接。")
+        elif not urls:
             raise ValueError("请先在左侧输入框里粘贴抖音分享文案或分享链接，一行一个。")
 
         output_dir = str(payload.get("output_dir", "")).strip() or str(DEFAULT_OUTPUT_DIR)
         manifest_path = str(payload.get("manifest_path", "")).strip() or str(
             DEFAULT_MANIFEST_PATH
         )
-        download_mode = str(payload.get("download_mode", "video")).strip() or "video"
         retries = max(1, int(payload.get("retries", 3)))
         timeout = max(5, int(payload.get("timeout", 60)))
         overwrite = bool(payload.get("overwrite", False))
         browser_name = str(payload.get("browser_name", "none")).strip() or "none"
         browser_profile = str(payload.get("browser_profile", "")).strip() or None
 
-        if download_mode not in {"video", "douyin_media", "image"}:
+        if download_mode not in {"video", "douyin_media", "image", "douyin_author_auto"}:
             raise ValueError("下载模式无效。")
 
         with self._lock:
@@ -114,17 +128,26 @@ class DownloadState:
             self.output_dir = output_dir
             self.manifest_path = manifest_path
             self.download_mode = download_mode
+            self.author_url = author_url
+            self.author_max_items = author_max_items
             mode_label = {
                 "video": "视频模式",
                 "douyin_media": "抖音图文 / 动图模式",
                 "image": "TikTok 图文模式",
+                "douyin_author_auto": "抖音作者主页批量模式",
             }.get(download_mode, "下载模式")
-            self.logs.append(f"已创建任务，共 {len(urls)} 条链接。当前为{mode_label}。")
+            planned_total = author_max_items if download_mode == "douyin_author_auto" else len(urls)
+            self.logs.append(f"已创建任务，当前为{mode_label}。")
+            if download_mode == "douyin_author_auto":
+                self.logs.append(f"作者主页: {author_url}")
+                self.logs.append(f"最多抓取: {author_max_items} 条作品。")
+            else:
+                self.logs.append(f"共 {len(urls)} 条链接。")
+            self.total = planned_total
 
         self.save_urls_text(urls_text)
 
         options = {
-            "urls": urls,
             "output_dir": output_dir,
             "manifest_path": manifest_path,
             "download_mode": download_mode,
@@ -134,6 +157,11 @@ class DownloadState:
             "timeout": timeout,
             "overwrite": overwrite,
         }
+        if download_mode != "douyin_author_auto":
+            options["urls"] = urls
+        else:
+            options["author_url"] = author_url
+            options["author_max_items"] = author_max_items
         self._worker = threading.Thread(target=self._run, args=(options,), daemon=True)
         self._worker.start()
         return self.snapshot()
@@ -166,7 +194,14 @@ class DownloadState:
                     self.logs.append(json.dumps(payload, ensure_ascii=False, indent=2))
 
         try:
-            if download_mode == "douyin_media":
+            if download_mode == "douyin_author_auto":
+                run_author_batch(
+                    source_url=options.pop("author_url"),
+                    max_items=options.pop("author_max_items"),
+                    progress_callback=callback,
+                    **options,
+                )
+            elif download_mode == "douyin_media":
                 run_note_batch(progress_callback=callback, **options)
             elif download_mode == "image":
                 run_image_batch(progress_callback=callback, **options)

@@ -35,10 +35,28 @@
               <select id="downloadMode">
                 <option value="video">视频模式（yt-dlp，支持抖音分享页）</option>
                 <option value="douyin_media">抖音图文 / 动图模式（新）</option>
+                <option value="douyin_author_auto">抖音作者主页批量模式（自动识别类型）</option>
                 <option value="image">TikTok 图文模式（gallery-dl，实验）</option>
               </select>
             </label>
             <div id="modeNotice" class="callout"></div>
+          </div>
+
+          <div class="section-divider"></div>
+
+          <div id="authorFields" class="split">
+            <label class="field">
+              <span>作者主页链接</span>
+              <input
+                id="authorUrl"
+                type="text"
+                placeholder="例如：https://www.douyin.com/user/xxxxxxxx 或作者分享短链"
+              />
+            </label>
+            <label class="field compact">
+              <span>最多抓取条数</span>
+              <input id="authorMaxItems" type="number" min="1" max="500" />
+            </label>
           </div>
 
           <div class="section-divider"></div>
