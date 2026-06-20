@@ -50,6 +50,7 @@ class DownloadState:
         self.manifest_path = str(DEFAULT_MANIFEST_PATH)
         self.author_url = ""
         self.author_max_items = 50
+        self.force_browser_fallback = False
 
     def defaults(self):
         urls_text = ""
@@ -65,6 +66,7 @@ class DownloadState:
             "overwrite": False,
             "author_url": "",
             "author_max_items": 50,
+            "force_browser_fallback": False,
             "browser_name": "none",
             "browser_profile": "",
             "runtime": runtime_info(),
@@ -86,6 +88,7 @@ class DownloadState:
                 "download_mode": getattr(self, "download_mode", "video"),
                 "author_url": self.author_url,
                 "author_max_items": self.author_max_items,
+                "force_browser_fallback": self.force_browser_fallback,
                 "runtime": runtime_info(),
             }
 
@@ -98,6 +101,7 @@ class DownloadState:
         urls = parse_share_text(urls_text)
         author_url = str(payload.get("author_url", "")).strip()
         author_max_items = max(1, int(payload.get("author_max_items", 50)))
+        force_browser_fallback = bool(payload.get("force_browser_fallback", False))
 
         if download_mode == "douyin_author_auto":
             if not author_url:
@@ -162,6 +166,7 @@ class DownloadState:
         else:
             options["author_url"] = author_url
             options["author_max_items"] = author_max_items
+            options["force_browser_fallback"] = force_browser_fallback
         self._worker = threading.Thread(target=self._run, args=(options,), daemon=True)
         self._worker.start()
         return self.snapshot()
@@ -198,6 +203,7 @@ class DownloadState:
                 run_author_batch(
                     source_url=options.pop("author_url"),
                     max_items=options.pop("author_max_items"),
+                    force_browser_fallback=options.pop("force_browser_fallback", False),
                     progress_callback=callback,
                     **options,
                 )

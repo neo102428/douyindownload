@@ -179,14 +179,42 @@ def _collect_browser_aweme_ids(
     collected = []
     timeout_ms = max(30, int(timeout)) * 1000
 
-    def merge_ids(values):
+    def merge_ids(json_str):
         added = 0
-        for value in values or []:
-            aweme_id = str(value or "").strip()
+        try:
+            items = json.loads(json_str) if json_str else []
+            # 调试日志：记录实际返回的数据
+            _emit(
+                progress_callback,
+                "log",
+                0,
+                limit or 0,
+                {"message": f"浏览器脚本返回数据: {type(items).__name__}, 长度: {len(items)}"},
+            )
+            if items:
+                _emit(
+                    progress_callback,
+                    "log",
+                    0,
+                    limit or 0,
+                    {"message": f"第一个项目: {type(items[0]).__name__}, 内容: {str(items[0])[:100]}"},
+                )
+        except (json.JSONDecodeError, TypeError) as e:
+            _emit(
+                progress_callback,
+                "log",
+                0,
+                limit or 0,
+                {"message": f"JSON解析失败: {e}, 原始数据: {str(json_str)[:200]}"},
+            )
+            return 0
+        for item in items or []:
+            aweme_id = str(item.get("id", "") if isinstance(item, dict) else item).strip()
+            link_type = item.get("type", "video") if isinstance(item, dict) else "video"
             if not aweme_id or aweme_id in seen:
                 continue
             seen.add(aweme_id)
-            collected.append(aweme_id)
+            collected.append({"id": aweme_id, "type": link_type})
             added += 1
             if limit and len(collected) >= limit:
                 break
@@ -196,45 +224,88 @@ def _collect_browser_aweme_ids(
 () => {
   const result = [];
   const seen = new Set();
-  const push = (id) => {
+  const push = (id, type) => {
     if (!id || seen.has(id)) return;
     seen.add(id);
-    result.push(id);
+    result.push({id: id, type: type});
   };
-  const collectFrom = (text, pattern) => {
+  const collectFrom = (text, pattern, type) => {
     if (!text) return;
     let match;
     while ((match = pattern.exec(text)) !== null) {
-      push(match[1]);
+      push(match[1], type);
     }
   };
   for (const node of document.querySelectorAll('a[href]')) {
     const href = node.getAttribute('href') || '';
-    collectFrom(href, /\\/video\\/(\\d{15,20})/g);
-    collectFrom(href, /\\/note\\/(\\d{15,20})/g);
-    collectFrom(href, /\\/slides\\/(\\d{15,20})/g);
+    collectFrom(href, /\\/video\\/(\\d{15,20})/g, 'video');
+    collectFrom(href, /\\/note\\/(\\d{15,20})/g, 'note');
+    collectFrom(href, /\\/slides\\/(\\d{15,20})/g, 'note');
   }
   const html = document.documentElement ? document.documentElement.innerHTML : '';
-  collectFrom(html, /"aweme_id":"(\\d{15,20})"/g);
-  collectFrom(html, /"group_id":"(\\d{15,20})"/g);
-  return result;
+  collectFrom(html, /"aweme_id":"(\\d{15,20})"/g, 'video');
+  collectFrom(html, /"group_id":"(\\d{15,20})"/g, 'video');
+  return JSON.stringify(result);
 }
 """
 
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-            ],
-        )
-        context = browser.new_context(locale="zh-CN", viewport={"width": 1600, "height": 900})
-        page = context.new_page()
+        # 尝试使用用户已经登录的浏览器的Profile
+        import platform
+        import os
+
+        # 获取Chrome的默认Profile路径
+        if platform.system() == 'Darwin':  # macOS
+            chrome_profile = os.path.expanduser('~/Library/Application Support/Google/Chrome')
+        elif platform.system() == 'Windows':
+            chrome_profile = os.path.expanduser('~\\AppData\\Local\\Google\\Chrome\\User Data')
+        else:  # Linux
+            chrome_profile = os.path.expanduser('~/.config/google-chrome')
+
+        # 检查Profile是否存在
+        if os.path.exists(chrome_profile):
+            _emit(progress_callback, "log", 0, limit or 0, {"message": "检测到Chrome Profile，尝试使用已登录的浏览器。"})
+            browser = playwright.chromium.launch_persistent_context(
+                chrome_profile,
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ],
+                locale="zh-CN",
+                viewport={"width": 1600, "height": 900},
+            )
+            page = browser.new_page()
+        else:
+            _emit(progress_callback, "log", 0, limit or 0, {"message": "未检测到Chrome Profile，启动新的浏览器实例。"})
+            browser = playwright.chromium.launch(
+                headless=False,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                    "--no-sandbox",
+                ],
+            )
+            context = browser.new_context(locale="zh-CN", viewport={"width": 1600, "height": 900})
+            page = context.new_page()
         try:
             _emit(progress_callback, "log", 0, limit or 0, {"message": "作者页接口可能漏作品，正在启动浏览器回补。"})
             page.goto(author_url, wait_until="domcontentloaded", timeout=timeout_ms)
+
+            # 等待用户登录（最多等待600秒，即10分钟）
+            _emit(progress_callback, "log", 0, limit or 0, {"message": "浏览器已打开抖音页面，请完成登录（包括验证码）。"})
+            _emit(progress_callback, "log", 0, limit or 0, {"message": "登录完成后，页面会显示作者的作品列表。"})
+            _emit(progress_callback, "log", 0, limit or 0, {"message": "看到作品列表后，请在终端按回车键开始收集作品ID。"})
+            _emit(progress_callback, "log", 0, limit or 0, {"message": "等待中... (最多等待10分钟)"})
+
+            # 简单等待用户按回车
+            try:
+                input(">>> 请在登录完成后按回车键继续...")
+            except:
+                pass
+
+            _emit(progress_callback, "log", 0, limit or 0, {"message": "开始收集作品ID。"})
 
             last_count = 0
             stable_rounds = 0
@@ -261,8 +332,9 @@ def _collect_browser_aweme_ids(
                 page.mouse.wheel(0, 3800)
                 page.wait_for_timeout(1200)
         finally:
-            context.close()
-            browser.close()
+            # 根据浏览器启动方式关闭
+            if hasattr(browser, 'close'):
+                browser.close()
 
     return collected
 
@@ -598,6 +670,7 @@ def run_author_batch(
     start_cursor=None,
     _recovery_attempted=False,
     _ignore_resume_seen=False,
+    force_browser_fallback=False,  # 新增参数：强制浏览器回补
 ):
     output_dir = str(Path(output_dir))
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -825,16 +898,39 @@ def run_author_batch(
         if not has_more:
             break
 
-    if not rows:
-        if resume_state or cursor:
+    # 检查是否所有作品都是跳过状态（已下载过）
+    all_skipped = all(row.get("status") == "skipped" for row in rows) if rows else False
+
+    # 强制浏览器回补，或者当所有作品都是跳过状态时触发
+    should_trigger_browser = force_browser_fallback or not rows or all_skipped
+
+    if should_trigger_browser:
+        if resume_state or cursor or force_browser_fallback:
             if not _recovery_attempted and not overwrite:
-                _emit(
-                    progress_callback,
-                    "log",
-                    0,
-                    total,
-                    {"message": "当前断点已经跑到末尾，正在从头补扫一次漏掉的作品。"},
-                )
+                if force_browser_fallback:
+                    _emit(
+                        progress_callback,
+                        "log",
+                        0,
+                        total,
+                        {"message": "强制触发浏览器回补，开始收集作品ID。"},
+                    )
+                elif all_skipped:
+                    _emit(
+                        progress_callback,
+                        "log",
+                        0,
+                        total,
+                        {"message": "所有识别到的作品都已下载过，正在从头补扫一次漏掉的作品。"},
+                    )
+                else:
+                    _emit(
+                        progress_callback,
+                        "log",
+                        0,
+                        total,
+                        {"message": "当前断点已经跑到末尾，正在从头补扫一次漏掉的作品。"},
+                    )
                 return run_author_batch(
                     source_url=source_url,
                     output_dir=output_dir,
@@ -850,11 +946,12 @@ def run_author_batch(
                     start_cursor=0,
                     _recovery_attempted=True,
                     _ignore_resume_seen=True,
+                    force_browser_fallback=force_browser_fallback,  # 传递强制浏览器回补参数
                 )
             if not overwrite:
                 recovered_seen = _rebuild_seen_from_downloads(output_dir)
                 try:
-                    browser_aweme_ids = _collect_browser_aweme_ids(
+                    browser_aweme_items = _collect_browser_aweme_ids(
                         resolved_source,
                         timeout=timeout,
                         max_items=max_items or 0,
@@ -869,20 +966,27 @@ def run_author_batch(
                         {"message": f"浏览器回补未启用：{exc}"},
                     )
                 else:
-                    missing_aweme_ids = [aweme_id for aweme_id in browser_aweme_ids if aweme_id not in recovered_seen]
-                    if missing_aweme_ids:
+                    missing_aweme_items = [item for item in browser_aweme_items if item["id"] not in recovered_seen]
+                    if missing_aweme_items:
                         _emit(
                             progress_callback,
                             "log",
                             0,
                             total,
-                            {"message": f"浏览器回补发现 {len(missing_aweme_ids)} 条疑似漏掉的作品，开始补下。"},
+                            {"message": f"浏览器回补发现 {len(missing_aweme_items)} 条疑似漏掉的作品，开始补下。"},
                         )
                         browser_rows = []
-                        for aweme_id in missing_aweme_ids:
+                        for item in missing_aweme_items:
+                            aweme_id = item["id"]
+                            link_type = item["type"]
                             if max_items and processed_new >= max_items:
                                 break
-                            share_url = f"https://www.douyin.com/video/{aweme_id}"
+                            if link_type == "note":
+                                share_url = f"https://www.douyin.com/note/{aweme_id}"
+                                primary_mode = "douyin_media"
+                            else:
+                                share_url = f"https://www.douyin.com/video/{aweme_id}"
+                                primary_mode = "video"
                             item_index = processed_new + 1
                             _emit(progress_callback, "start", item_index, max_items or 0, {"url": share_url})
                             result, chosen_mode = _download_with_fallback(
@@ -897,7 +1001,7 @@ def run_author_batch(
                                 index=item_index,
                                 total=max_items or 0,
                                 existing_index=existing_index,
-                                primary_mode="douyin_media",
+                                primary_mode=primary_mode,
                             )
                             result["url"] = share_url
                             result["id"] = aweme_id
