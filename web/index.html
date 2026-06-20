@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>分享链接批量下载</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <div>
+          <h1>抖音 / TikTok 分享链接批量下载</h1>
+          <p>左侧粘贴分享文案或分享链接，一行一个。视频模式走 yt-dlp，抖音图文 / 动图模式走抖音详情接口，TikTok 图文模式走 gallery-dl。</p>
+        </div>
+        <div class="hint">仅用于你已获得作者授权的内容链接</div>
+      </header>
+
+      <main class="layout">
+        <section class="panel panel-main">
+          <div class="panel-head">
+            <div>
+              <h2>链接输入区</h2>
+              <p>这里就是粘贴分享文案或短链的地方。</p>
+            </div>
+            <div class="actions">
+              <button id="loadUrlsBtn" class="btn btn-secondary">读取 urls.txt</button>
+              <button id="saveUrlsBtn" class="btn btn-secondary">保存到 urls.txt</button>
+            </div>
+          </div>
+
+          <div class="mode-block">
+            <label class="field">
+              <span>下载模式</span>
+              <select id="downloadMode">
+                <option value="video">视频模式（yt-dlp，支持抖音分享页）</option>
+                <option value="douyin_media">抖音图文 / 动图模式（新）</option>
+                <option value="image">TikTok 图文模式（gallery-dl，实验）</option>
+              </select>
+            </label>
+            <div id="modeNotice" class="callout"></div>
+          </div>
+
+          <div class="section-divider"></div>
+
+          <label class="field">
+            <span>分享文案或短链</span>
+            <textarea
+              id="urlsText"
+              placeholder="把分享文案粘贴在这里，一行一个&#10;例如：&#10;7.61 复制打开抖音，看看…… https://v.douyin.com/xxxxx/&#10;https://v.douyin.com/yyyyy/&#10;https://www.tiktok.com/@someone/photo/1234567890"
+            ></textarea>
+          </label>
+
+          <div class="split">
+            <label class="field">
+              <span>当前模式说明</span>
+              <textarea id="notesBox" class="small-textarea" readonly></textarea>
+            </label>
+            <div class="side-note">
+              <h3>粘贴位置就在左边</h3>
+              <ul>
+                <li>可以直接粘贴完整分享文案，不必自己先手动提取 URL。</li>
+                <li>一行一个，支持混合粘贴文案和裸链接。</li>
+                <li>开始下载后，底部日志会显示每条链接的处理结果。</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel panel-side">
+          <h2>下载设置</h2>
+          <div class="settings">
+            <section class="settings-group">
+              <h3>输出位置</h3>
+              <label class="field">
+                <span>下载目录</span>
+                <input id="outputDir" type="text" />
+              </label>
+              <label class="field">
+                <span>清单文件路径</span>
+                <input id="manifestPath" type="text" />
+              </label>
+            </section>
+
+            <section class="settings-group">
+              <h3>Cookie 与登录态</h3>
+              <label class="field">
+                <span>浏览器 Cookie 来源</span>
+                <select id="browserName"></select>
+              </label>
+              <label class="field">
+                <span>浏览器 Profile（可留空）</span>
+                <input id="browserProfile" type="text" placeholder="例如 Default；不确定就留空" />
+              </label>
+            </section>
+
+            <section class="settings-group">
+              <h3>重试与覆盖</h3>
+              <div class="row">
+                <label class="field compact">
+                  <span>重试次数</span>
+                  <input id="retries" type="number" min="1" max="10" />
+                </label>
+                <label class="field compact">
+                  <span>超时秒数</span>
+                  <input id="timeout" type="number" min="5" max="600" />
+                </label>
+              </div>
+              <label class="checkbox">
+                <input id="overwrite" type="checkbox" />
+                <span>覆盖同名文件</span>
+              </label>
+            </section>
+
+            <button id="startBtn" class="btn btn-primary">开始下载</button>
+          </div>
+        </aside>
+      </main>
+
+      <section class="panel panel-log">
+        <div class="panel-head">
+          <div>
+            <h2>任务状态</h2>
+            <p id="statusText">就绪</p>
+          </div>
+          <div class="progress-meta" id="progressText">0 / 0</div>
+        </div>
+        <div class="progress-bar">
+          <div id="progressFill" class="progress-fill"></div>
+        </div>
+        <div class="runtime" id="runtimeBox"></div>
+        <div class="summary" id="summaryBox"></div>
+        <label class="field">
+          <span>运行日志</span>
+          <textarea id="logText" class="log-text" readonly></textarea>
+        </label>
+      </section>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

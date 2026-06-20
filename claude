@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /Users/liujinrui/.local/lib/node_modules/@anthropic-ai/claude-code-darwin-arm64/claude "$@"
