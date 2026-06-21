@@ -162,8 +162,12 @@ function renderState(snapshot) {
     els.dateRangeFields.style.display = els.downloadRange.value === "date_range" ? "" : "none";
   }
   updateProgress(snapshot.current || 0, snapshot.total || 0);
+  // Only auto-scroll if user is already at the bottom
+  const atBottom = els.logText.scrollHeight - els.logText.scrollTop - els.logText.clientHeight < 40;
   els.logText.value = (snapshot.logs || []).join("\n");
-  els.logText.scrollTop = els.logText.scrollHeight;
+  if (atBottom) {
+    els.logText.scrollTop = els.logText.scrollHeight;
+  }
   renderSummary(snapshot);
   renderRuntime(snapshot.runtime || {});
   renderModeUi(snapshot.runtime || {}, els.downloadMode.value, els.browserName.value);

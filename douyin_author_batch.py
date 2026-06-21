@@ -160,6 +160,34 @@ def _fetch_author_page(opener, sec_user_id, max_cursor, count, timeout):
     return payload
 
 
+DETAIL_URL = "https://www.douyin.com/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}"
+DETAIL_URL_WEBAPP = (
+    "https://www.douyin.com/aweme/v1/web/aweme/detail/"
+    "?aweme_id={aweme_id}"
+    "&aid=6383"
+    "&device_platform=webapp"
+)
+
+
+def _fetch_aweme_detail(opener, aweme_id, timeout):
+    """Fetch a single aweme's detail for create_time and type detection."""
+    headers = {
+        "Referer": f"https://www.douyin.com/video/{aweme_id}",
+        "Accept": "application/json, text/plain, */*",
+    }
+    for url in [DETAIL_URL.format(aweme_id=aweme_id),
+                DETAIL_URL_WEBAPP.format(aweme_id=aweme_id)]:
+        try:
+            with _open(opener, url, timeout, headers=headers) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            detail = payload.get("aweme_detail")
+            if isinstance(detail, dict):
+                return detail
+        except Exception:
+            continue
+    return None
+
+
 def _aweme_share_url(aweme):
     aweme_id = str(aweme.get("aweme_id") or "").strip()
     if not aweme_id:
@@ -837,7 +865,8 @@ def run_author_batch(
                       f"新下载 {processed_new} 条。"})
 
     # Browser fallback: discover any aweme_ids the API missed.
-    if seen_aweme_ids and not max_items:
+    # Respect download range: filter by date or count same as API phase.
+    if seen_aweme_ids:
         try:
             existing_aweme_ids = set(existing_aweme_index.keys())
             browser_ids = _collect_browser_aweme_ids(
@@ -848,10 +877,52 @@ def run_author_batch(
                       {"message": f"浏览器回补：页面发现 {len(browser_ids)} 条，"
                                   f"API 未返回 {len(missing)} 条。"})
                 if missing:
+                    # Fetch detail for each missing item to get create_time and type
+                    missing_details = []
                     for aid in sorted(missing):
-                        share_url = f"https://www.douyin.com/video/{aid}"
+                        detail = _fetch_aweme_detail(opener, aid, timeout)
+                        if not detail:
+                            continue
+                        ct = detail.get("create_time")
+                        missing_details.append((aid, ct, detail))
+
+                    # Date range filter (same as API phase)
+                    if start_ts or end_ts:
+                        before = len(missing_details)
+                        filtered = []
+                        for aid, ct, detail in missing_details:
+                            if start_ts and ct:
+                                try:
+                                    if int(ct) < start_ts:
+                                        continue
+                                except (TypeError, ValueError):
+                                    continue
+                            if end_ts and ct:
+                                try:
+                                    if int(ct) > end_ts:
+                                        continue
+                                except (TypeError, ValueError):
+                                    continue
+                            filtered.append((aid, ct, detail))
+                        missing_details = filtered
                         _emit(progress_callback, "log", 0, 0,
-                              {"message": f"回补下载: {aid}"})
+                              {"message": f"日期过滤：{before} 条 -> {len(missing_details)} 条在范围内。"})
+
+                    # Count limit
+                    if max_items:
+                        remaining = max_items - processed_new
+                        if remaining <= 0:
+                            missing_details = []
+                        else:
+                            missing_details = missing_details[:remaining]
+                            _emit(progress_callback, "log", 0, 0,
+                                  {"message": f"数量限制：仅回补前 {len(missing_details)} 条。"})
+
+                    for aid, ct, detail in missing_details:
+                        detected_mode = _aweme_detected_mode(detail)
+                        share_url = f"https://www.douyin.com/note/{aid}" if detected_mode == "douyin_media" else f"https://www.douyin.com/video/{aid}"
+                        _emit(progress_callback, "log", 0, 0,
+                              {"message": f"回补下载: {aid} ({'图文' if detected_mode == 'douyin_media' else '视频'})"})
                         result, chosen_mode = _download_with_fallback(
                             share_url=share_url, output_dir=output_dir,
                             browser_name=browser_name, browser_profile=browser_profile,
@@ -859,7 +930,7 @@ def run_author_batch(
                             progress_callback=progress_callback,
                             index=processed_new + 1, total=0,
                             existing_index=existing_index,
-                            primary_mode="video",
+                            primary_mode=detected_mode,
                         )
                         if result.get("status") == "failed":
                             result["note"] = _failure_note(chosen_mode, result.get("note", ""))
@@ -872,8 +943,10 @@ def run_author_batch(
                                 existing_aweme_index[aid] = Path(marker)
                         rows.append(_row_from_result(source_url, sec_user_id, nickname,
                                                      chosen_mode, result))
+                        if max_items and processed_new >= max_items:
+                            break
                     _emit(progress_callback, "log", 0, 0,
-                          {"message": f"浏览器回补完成，补充处理 {len(missing)} 条。"})
+                          {"message": f"浏览器回补完成，补充处理 {len(missing_details)} 条。"})
         except Exception as exc:
             _emit(progress_callback, "log", 0, 0,
                   {"message": f"浏览器回补失败（不影响已下载内容）：{exc}"})
