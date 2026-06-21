@@ -134,6 +134,7 @@ class DownloadState:
             self.download_mode = download_mode
             self.author_url = author_url
             self.author_max_items = author_max_items
+            self.force_browser_fallback = force_browser_fallback
             mode_label = {
                 "video": "视频模式",
                 "douyin_media": "抖音图文 / 动图模式",
