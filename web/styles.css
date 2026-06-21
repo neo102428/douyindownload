@@ -255,6 +255,30 @@ select:focus {
 }
 
 .btn-primary:hover:enabled {
+  background: #2563eb;
+}
+
+.btn-danger {
+  background: #dc2626;
+  border-color: #dc2626;
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-danger:hover:enabled {
+  background: #b91c1c;
+}
+
+.btn-group {
+  display: flex;
+  gap: 8px;
+}
+
+.btn-group .btn {
+  flex: 1;
+}
+
+.btn-primary:hover:enabled {
   background: var(--blue-dark);
 }
 

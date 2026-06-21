@@ -656,6 +656,10 @@ def _build_slideshow(image_paths, output_path, ffmpeg_path, audio_path=None):
 
 
 def _item_meta_path(item_dir):
+    return Path(item_dir) / ".meta" / ITEM_META_NAME
+
+
+def _item_meta_path_legacy(item_dir):
     return Path(item_dir) / ITEM_META_NAME
 
 
@@ -667,7 +671,9 @@ def _write_item_meta(item_dir, row):
         "kind": row.get("kind", ""),
         "dir": str(item_dir),
     }
-    _item_meta_path(item_dir).write_text(
+    target = _item_meta_path(item_dir)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
@@ -683,7 +689,10 @@ def _load_existing_index(output_dir):
         if not child.is_dir():
             continue
 
+        # Check new .meta/ location first, then legacy top-level location
         meta_path = _item_meta_path(child)
+        if not meta_path.exists():
+            meta_path = _item_meta_path_legacy(child)
         if meta_path.exists():
             try:
                 meta = json.loads(meta_path.read_text(encoding="utf-8"))
@@ -710,6 +719,7 @@ def _looks_downloaded_dir(path):
         path / "preview_motion_merged.mp4",
         path / "preview_slideshow.mp4",
         _item_meta_path(path),
+        _item_meta_path_legacy(path),
     )
     return any(item.exists() for item in expected_paths)
 

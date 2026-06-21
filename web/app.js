@@ -12,8 +12,10 @@ const els = {
   manifestPath: document.getElementById("manifestPath"),
   authorFields: document.getElementById("authorFields"),
   authorUrl: document.getElementById("authorUrl"),
-  authorMaxItems: document.getElementById("authorMaxItems"),
-  forceBrowserFallback: document.getElementById("forceBrowserFallback"),
+  downloadRange: document.getElementById("downloadRange"),
+  dateRangeFields: document.getElementById("dateRangeFields"),
+  dateStart: document.getElementById("dateStart"),
+  dateEnd: document.getElementById("dateEnd"),
   browserName: document.getElementById("browserName"),
   browserProfile: document.getElementById("browserProfile"),
   retries: document.getElementById("retries"),
@@ -26,6 +28,8 @@ const els = {
   summaryBox: document.getElementById("summaryBox"),
   runtimeBox: document.getElementById("runtimeBox"),
   startBtn: document.getElementById("startBtn"),
+  pauseBtn: document.getElementById("pauseBtn"),
+  cancelBtn: document.getElementById("cancelBtn"),
   loadUrlsBtn: document.getElementById("loadUrlsBtn"),
   saveUrlsBtn: document.getElementById("saveUrlsBtn"),
 };
@@ -61,7 +65,7 @@ const MODE_CONTENT = {
       "2. 作品列表接口通常更依赖登录态，建议优先选择你已经登录抖音网页版的浏览器 Cookie。",
       "3. 同一个作者主页批量抓取时，程序会优先按作品 ID 去重，并记住断点，下次会从上次停下的位置继续。",
       "4. 图文 / 动图作品会走抖音图文模式；普通视频作品会走 yt-dlp 视频模式。",
-      "5. 如果作者列表接口漏掉一部分作品，程序会尝试从作者主页本身回补作品 ID；首次启用这一步时，可能会弹出浏览器页面。",
+      "5. 如果作者列表接口漏掉一部分作品，程序会自动弹出浏览器扫描作者主页，补齐遗漏的作品 ID 再下载；首次启用时可能需要在浏览器里登录。",
       "6. 如果你只想刷新某个作者以前下过的旧文件，再手动勾选“覆盖同名文件”。",
     ].join("\n"),
   },
@@ -84,8 +88,9 @@ function payloadFromForm() {
     output_dir: els.outputDir.value,
     manifest_path: els.manifestPath.value,
     author_url: els.authorUrl.value,
-    author_max_items: Number(els.authorMaxItems.value || 50),
-    force_browser_fallback: els.forceBrowserFallback.checked,
+    download_range: els.downloadRange.value,
+    date_start: els.dateStart.value,
+    date_end: els.dateEnd.value,
     browser_name: els.browserName.value,
     browser_profile: els.browserProfile.value,
     retries: Number(els.retries.value || 3),
@@ -108,9 +113,15 @@ async function requestJson(url, options = {}) {
 
 function setRunning(running) {
   els.startBtn.disabled = running;
+  els.startBtn.style.display = running ? "none" : "";
+  els.pauseBtn.style.display = running ? "" : "none";
+  els.cancelBtn.style.display = running ? "" : "none";
   els.loadUrlsBtn.disabled = running;
   els.saveUrlsBtn.disabled = running;
   els.downloadMode.disabled = running;
+  if (!running) {
+    els.pauseBtn.textContent = "暂停";
+  }
 }
 
 function updateProgress(current, total) {
@@ -145,7 +156,10 @@ function renderState(snapshot) {
   if (snapshot.running && snapshot.download_mode) {
     els.downloadMode.value = snapshot.download_mode;
     els.authorUrl.value = snapshot.author_url;
-    els.authorMaxItems.value = snapshot.author_max_items;
+    els.downloadRange.value = snapshot.download_range || "all";
+    els.dateStart.value = snapshot.date_start || "";
+    els.dateEnd.value = snapshot.date_end || "";
+    els.dateRangeFields.style.display = els.downloadRange.value === "date_range" ? "" : "none";
   }
   updateProgress(snapshot.current || 0, snapshot.total || 0);
   els.logText.value = (snapshot.logs || []).join("\n");
@@ -154,6 +168,7 @@ function renderState(snapshot) {
   renderRuntime(snapshot.runtime || {});
   renderModeUi(snapshot.runtime || {}, els.downloadMode.value, els.browserName.value);
   setRunning(Boolean(snapshot.running));
+  els.pauseBtn.textContent = snapshot.paused ? "恢复" : "暂停";
 }
 
 function renderRuntime(runtime) {
@@ -212,7 +227,10 @@ async function loadDefaults() {
   els.outputDir.value = defaults.output_dir || "";
   els.manifestPath.value = defaults.manifest_path || "";
   els.authorUrl.value = defaults.author_url || "";
-  els.authorMaxItems.value = defaults.author_max_items || 50;
+  els.downloadRange.value = defaults.download_range || "all";
+  els.dateStart.value = defaults.date_start || "";
+  els.dateEnd.value = defaults.date_end || "";
+  els.dateRangeFields.style.display = els.downloadRange.value === "date_range" ? "" : "none";
   els.browserProfile.value = defaults.browser_profile || "";
   els.retries.value = defaults.retries || 3;
   els.timeout.value = defaults.timeout || 60;
@@ -240,6 +258,27 @@ async function startDownload() {
   }
 }
 
+async function pauseResume() {
+  const isPaused = els.pauseBtn.textContent === "恢复";
+  const endpoint = isPaused ? "/api/resume" : "/api/pause";
+  try {
+    await requestJson(endpoint, { method: "POST" });
+    await refreshState();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function cancelDownload() {
+  if (!confirm("确定要取消下载吗？当前文件完成后会停止。")) return;
+  try {
+    await requestJson("/api/cancel", { method: "POST" });
+    await refreshState();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
 async function saveUrls() {
   try {
     await requestJson("/api/save-urls", {
@@ -263,10 +302,15 @@ async function init() {
   }, 1200);
 
   els.startBtn.addEventListener("click", startDownload);
+  els.pauseBtn.addEventListener("click", pauseResume);
+  els.cancelBtn.addEventListener("click", cancelDownload);
   els.loadUrlsBtn.addEventListener("click", loadDefaults);
   els.saveUrlsBtn.addEventListener("click", saveUrls);
   els.downloadMode.addEventListener("change", () => {
     renderModeUi(state.runtime || {}, els.downloadMode.value, els.browserName.value);
+  });
+  els.downloadRange.addEventListener("change", () => {
+    els.dateRangeFields.style.display = els.downloadRange.value === "date_range" ? "" : "none";
   });
 }
 

@@ -54,15 +54,24 @@
               />
             </label>
             <label class="field compact">
-              <span>最多抓取条数</span>
-              <input id="authorMaxItems" type="number" min="1" max="500" />
+              <span>下载范围</span>
+              <select id="downloadRange">
+                <option value="all">全部下载</option>
+                <option value="last50">最近 50 条</option>
+                <option value="last100">最近 100 条</option>
+                <option value="date_range">指定日期范围</option>
+              </select>
             </label>
-            <label class="field compact">
-              <span>
-                <input id="forceBrowserFallback" type="checkbox" />
-                强制浏览器回补（收集遗漏作品）
-              </span>
-            </label>
+            <div id="dateRangeFields" class="split" style="display:none">
+              <label class="field compact">
+                <span>开始日期</span>
+                <input id="dateStart" type="date" />
+              </label>
+              <label class="field compact">
+                <span>结束日期</span>
+                <input id="dateEnd" type="date" />
+              </label>
+            </div>
           </div>
 
           <div class="section-divider"></div>
@@ -136,7 +145,11 @@
               </label>
             </section>
 
-            <button id="startBtn" class="btn btn-primary">开始下载</button>
+            <div class="btn-group">
+              <button id="startBtn" class="btn btn-primary">开始下载</button>
+              <button id="pauseBtn" class="btn btn-secondary" style="display:none">暂停</button>
+              <button id="cancelBtn" class="btn btn-danger" style="display:none">取消</button>
+            </div>
           </div>
         </aside>
       </main>

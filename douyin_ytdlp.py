@@ -161,7 +161,7 @@ def _friendly_error_message(message):
 
 def _video_meta_path(media_path):
     path = Path(media_path)
-    return path.with_suffix(path.suffix + VIDEO_META_SUFFIX)
+    return path.parent / ".meta" / (path.name + VIDEO_META_SUFFIX)
 
 
 def _write_video_meta(row):
@@ -175,7 +175,9 @@ def _write_video_meta(row):
         "path": media_path,
         "ext": row.get("ext", ""),
     }
-    _video_meta_path(media_path).write_text(
+    target = _video_meta_path(media_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )

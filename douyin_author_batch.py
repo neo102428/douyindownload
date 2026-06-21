@@ -160,131 +160,6 @@ def _fetch_author_page(opener, sec_user_id, max_cursor, count, timeout):
     return payload
 
 
-def _collect_browser_aweme_ids(
-    author_url,
-    timeout,
-    max_items,
-    progress_callback,
-):
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception as exc:
-        raise RuntimeError(
-            "作者主页浏览器回补需要先安装 Playwright。"
-            "可执行：python3 -m pip install playwright && python3 -m playwright install chromium"
-        ) from exc
-
-    limit = int(max_items or 0)
-    seen = set()
-    collected = []
-    timeout_ms = max(30, int(timeout)) * 1000
-
-    def merge_ids(json_str):
-        added = 0
-        try:
-            items = json.loads(json_str) if json_str else []
-        except (json.JSONDecodeError, TypeError):
-            return 0
-        for item in items or []:
-            aweme_id = str(item.get("id", "") if isinstance(item, dict) else item).strip()
-            link_type = item.get("type", "video") if isinstance(item, dict) else "video"
-            if not aweme_id or aweme_id in seen:
-                continue
-            seen.add(aweme_id)
-            collected.append({"id": aweme_id, "type": link_type})
-            added += 1
-            if limit and len(collected) >= limit:
-                break
-        return added
-
-    script = """
-() => {
-  const result = [];
-  const seen = new Set();
-  const push = (id, type) => {
-    if (!id || seen.has(id)) return;
-    seen.add(id);
-    result.push({id: id, type: type});
-  };
-  const collectFrom = (text, pattern, type) => {
-    if (!text) return;
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      push(match[1], type);
-    }
-  };
-  for (const node of document.querySelectorAll('a[href]')) {
-    const href = node.getAttribute('href') || '';
-    collectFrom(href, /\\/video\\/(\\d{15,20})/g, 'video');
-    collectFrom(href, /\\/note\\/(\\d{15,20})/g, 'note');
-    collectFrom(href, /\\/slides\\/(\\d{15,20})/g, 'note');
-  }
-  const html = document.documentElement ? document.documentElement.innerHTML : '';
-  collectFrom(html, /"aweme_id":"(\\d{15,20})"/g, 'video');
-  collectFrom(html, /"group_id":"(\\d{15,20})"/g, 'video');
-  return JSON.stringify(result);
-}
-"""
-
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=False,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-            ],
-        )
-        context = browser.new_context(locale="zh-CN", viewport={"width": 1600, "height": 900})
-        page = context.new_page()
-        try:
-            _emit(progress_callback, "log", 0, limit or 0, {"message": "作者页接口可能漏作品，正在启动浏览器回补。"})
-            page.goto(author_url, wait_until="domcontentloaded", timeout=timeout_ms)
-
-            # 等待用户登录
-            _emit(progress_callback, "log", 0, limit or 0, {"message": "浏览器已打开抖音页面，请完成登录（包括验证码）。"})
-            _emit(progress_callback, "log", 0, limit or 0, {"message": "登录完成后，页面会显示作者的作品列表。"})
-            _emit(progress_callback, "log", 0, limit or 0, {"message": "看到作品列表后，请在终端按回车键开始收集作品ID。"})
-
-            # 简单等待用户按回车
-            try:
-                input(">>> 请在登录完成后按回车键继续...")
-            except:
-                pass
-
-            _emit(progress_callback, "log", 0, limit or 0, {"message": "开始收集作品ID。"})
-
-            last_count = 0
-            stable_rounds = 0
-            max_rounds = 240
-            for round_index in range(1, max_rounds + 1):
-                merge_ids(page.evaluate(script))
-                if limit and len(collected) >= limit:
-                    break
-                if len(collected) == last_count:
-                    stable_rounds += 1
-                else:
-                    stable_rounds = 0
-                    last_count = len(collected)
-                if stable_rounds >= 8:
-                    break
-                if round_index == 1 or round_index % 10 == 0:
-                    _emit(
-                        progress_callback,
-                        "log",
-                        0,
-                        limit or 0,
-                        {"message": f"浏览器回补中，已发现 {len(collected)} 条作品 ID。"},
-                    )
-                page.mouse.wheel(0, 3800)
-                page.wait_for_timeout(1200)
-        finally:
-            context.close()
-            browser.close()
-
-    return collected
-
-
 def _aweme_share_url(aweme):
     aweme_id = str(aweme.get("aweme_id") or "").strip()
     if not aweme_id:
@@ -344,17 +219,23 @@ def _load_existing_aweme_index(output_dir):
     if not root.exists():
         return index
 
-    for child in root.iterdir():
-        if not child.is_file() or not child.name.endswith(".video.json"):
-            continue
-        try:
-            meta = json.loads(child.read_text(encoding="utf-8"))
-        except (OSError, ValueError, TypeError):
-            continue
-        aweme_id = str(meta.get("aweme_id") or "").strip()
-        media_path = str(meta.get("path") or "").strip()
-        if aweme_id and media_path:
-            index.setdefault(aweme_id, Path(media_path))
+    # Scan .meta/ subdirectory for video metadata (new location)
+    meta_dir = root / ".meta"
+    scan_dirs = [root]
+    if meta_dir.is_dir():
+        scan_dirs.append(meta_dir)
+    for scan_dir in scan_dirs:
+        for child in scan_dir.iterdir():
+            if not child.is_file() or not child.name.endswith(".video.json"):
+                continue
+            try:
+                meta = json.loads(child.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                continue
+            aweme_id = str(meta.get("aweme_id") or "").strip()
+            media_path = str(meta.get("path") or "").strip()
+            if aweme_id and media_path:
+                index.setdefault(aweme_id, Path(media_path))
 
     for child in root.iterdir():
         if not child.is_file():
@@ -423,11 +304,27 @@ def _load_author_resume(output_dir, sec_user_id):
         data["seen_aweme_ids"] = []
     if not isinstance(data.get("failed_aweme_ids"), list):
         data["failed_aweme_ids"] = []
+    # Normalize old format (plain string IDs) to new format (dicts with mode)
+    normalized = []
+    for item in data["failed_aweme_ids"]:
+        if isinstance(item, dict) and item.get("id"):
+            normalized.append(item)
+        elif isinstance(item, str) and item.strip():
+            normalized.append({"id": item.strip(), "mode": "video"})
+    data["failed_aweme_ids"] = normalized
     return data
 
 
 def _save_author_resume(output_dir, data):
     path = _author_resume_path(output_dir)
+    # Deduplicate failed_aweme_ids by "id", preserving last occurrence (and its mode)
+    seen_ids = {}
+    for item in data.get("failed_aweme_ids", []):
+        if isinstance(item, dict) and item.get("id"):
+            seen_ids[item["id"]] = item
+        elif isinstance(item, str) and item.strip():
+            seen_ids[item.strip()] = {"id": item.strip(), "mode": "video"}
+    failed_aweme_ids = list(seen_ids.values())
     payload = {
         "source_url": data.get("source_url", ""),
         "resolved_source": data.get("resolved_source", ""),
@@ -435,7 +332,7 @@ def _save_author_resume(output_dir, data):
         "author_nickname": data.get("author_nickname", ""),
         "cursor": data.get("cursor", 0),
         "seen_aweme_ids": list(dict.fromkeys(data.get("seen_aweme_ids", []))),
-        "failed_aweme_ids": list(dict.fromkeys(data.get("failed_aweme_ids", []))),
+        "failed_aweme_ids": failed_aweme_ids,
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -601,6 +498,200 @@ def _download_with_fallback(
     return result, mode_order[-1]
 
 
+def _browser_video_links(page):
+    """Extract aweme IDs from the author's own video/note links, excluding recommendations."""
+    return set(page.evaluate("""
+        () => {
+          const ids = new Set();
+          // Find the main content area (author's post list)
+          const main = document.querySelector('[class*="post"]')
+            || document.querySelector('main')
+            || document.querySelector('[role="main"]')
+            || document.documentElement;
+          // Exclude recommendation, sidebar, related sections
+          const exclude = 'nav, header, footer, aside, [class*="recommend"], [class*="sidebar"], [class*="related"], [class*="suggest"]';
+          const excludeEls = main.querySelectorAll(exclude);
+          const isExcluded = (el) => {
+            for (const ex of excludeEls) { if (ex.contains(el)) return true; }
+            return false;
+          };
+          for (const a of main.querySelectorAll('a[href]')) {
+            if (isExcluded(a)) continue;
+            const href = a.getAttribute('href') || '';
+            const m = href.match(/\\/(video|note|slides)\\/(\\d{15,20})/);
+            if (m) ids.add(m[2]);
+          }
+          return [...ids];
+        }
+    """))
+
+
+def _collect_browser_aweme_ids(sec_user_id, browser_name, browser_profile, progress_callback):
+    """Use Playwright to scroll through the author page and collect all aweme IDs."""
+    from playwright.sync_api import sync_playwright
+
+    url = f"https://www.douyin.com/user/{sec_user_id}"
+
+    _emit(progress_callback, "log", 0, 0,
+          {"message": "浏览器回补：打开作者主页扫描遗漏作品..."})
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(
+            headless=False,
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox"],
+        )
+        context = browser.new_context(
+            viewport={"width": 1400, "height": 1080},
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                       "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        )
+        context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        """)
+        page = context.new_page()
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(4000)
+
+            # Always wait for user to confirm login in the terminal
+            _emit(progress_callback, "log", 0, 0,
+                  {"message": "请在弹出的浏览器中完成登录，然后回到终端按回车继续。"})
+            try:
+                input("[浏览器回补] 登录完成后按回车继续...")
+            except (EOFError, OSError):
+                _emit(progress_callback, "log", 0, 0,
+                      {"message": "无终端输入，等待 3 分钟供手动登录..."})
+                page.wait_for_timeout(180000)
+                _emit(progress_callback, "log", 0, 0,
+                      {"message": "等待结束，继续扫描。"})
+
+            page.wait_for_timeout(3000)
+
+            # Scroll through the page to load all videos
+            _emit(progress_callback, "log", 0, 0, {"message": "开始滚动页面收集视频..."})
+
+            # Find the actual scrollable container (Douyin uses an internal div)
+            scroll_container = page.evaluate("""
+                () => {
+                  // Try common content containers
+                  const candidates = document.querySelectorAll(
+                    'main, [role="main"], [class*="scroll"], [class*="list"], [class*="feed"], [class*="post"]'
+                  );
+                  for (const el of candidates) {
+                    const s = getComputedStyle(el);
+                    if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
+                      return true;  // found it, will scroll via this method
+                    }
+                  }
+                  // Broader search
+                  for (const el of document.querySelectorAll('div, section')) {
+                    const s = getComputedStyle(el);
+                    if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 100) {
+                      return true;
+                    }
+                  }
+                  return false;
+                }
+            """)
+
+            scroll_script = """
+                () => {
+                  const candidates = document.querySelectorAll(
+                    'main, [role="main"], [class*="scroll"], [class*="list"], [class*="feed"], [class*="post"]'
+                  );
+                  for (const el of candidates) {
+                    const s = getComputedStyle(el);
+                    if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
+                      el.scrollBy(0, el.clientHeight * 3);
+                      return el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
+                    }
+                  }
+                  for (const el of document.querySelectorAll('div, section')) {
+                    const s = getComputedStyle(el);
+                    if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 100) {
+                      el.scrollBy(0, el.clientHeight * 3);
+                      return el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
+                    }
+                  }
+                  window.scrollTo(0, document.body.scrollHeight);
+                  return false;
+                }
+            """
+
+            _emit(progress_callback, "log", 0, 0,
+                  {"message": f"找到内部滚动容器: {scroll_container}"})
+
+            last_count = 0
+            no_new_count = 0
+            scroll_count = 0
+            max_no_new = 8
+
+            while no_new_count < max_no_new:
+                page.evaluate(scroll_script)
+                page.wait_for_timeout(2500)
+
+                scroll_count += 1
+
+                no_more = page.query_selector('text="暂时没有更多了"')
+                no_more2 = page.query_selector('text="已经到底了"')
+
+                ids = _browser_video_links(page)
+
+                if len(ids) == last_count:
+                    no_new_count += 1
+                else:
+                    no_new_count = 0
+                last_count = len(ids)
+
+                _emit(progress_callback, "log", 0, 0,
+                      {"message": f"  第 {scroll_count} 次滚动，当前找到 {len(ids)} 条作品。"})
+
+                if no_more or no_more2:
+                    _emit(progress_callback, "log", 0, 0,
+                          {"message": "检测到页面提示已到底部。"})
+                    break
+
+            ids = _browser_video_links(page)
+            _emit(progress_callback, "log", 0, 0,
+                  {"message": f"页面扫描完成，共发现 {len(ids)} 条作品。"})
+            return ids
+        finally:
+            browser.close()
+
+
+def _parse_date_start(value):
+    """Parse 'YYYY-MM-DD' into a Unix timestamp (start of that day)."""
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        dt = datetime.datetime.strptime(value, "%Y-%m-%d")
+        return int(dt.timestamp())
+    except (ValueError, TypeError):
+        return None
+
+
+def _parse_date_end(value):
+    """Parse 'YYYY-MM-DD' into a Unix timestamp (end of that day, 23:59:59)."""
+    value = str(value or "").strip()
+    if not value:
+        return None
+    try:
+        dt = datetime.datetime.strptime(value, "%Y-%m-%d")
+        return int(dt.timestamp()) + 86399
+    except (ValueError, TypeError):
+        return None
+
+
+def _format_date_range(start_ts, end_ts):
+    parts = []
+    if start_ts:
+        parts.append(datetime.datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d"))
+    if end_ts:
+        parts.append(datetime.datetime.fromtimestamp(end_ts).strftime("%Y-%m-%d"))
+    return " 至 ".join(parts) if parts else ""
+
+
 def run_author_batch(
     source_url,
     output_dir="downloads",
@@ -613,10 +704,8 @@ def run_author_batch(
     progress_callback=None,
     page_count=20,
     max_items=0,
-    start_cursor=None,
-    _recovery_attempted=False,
-    _ignore_resume_seen=False,
-    force_browser_fallback=False,
+    date_start="",
+    date_end="",
 ):
     output_dir = str(Path(output_dir))
     Path(output_dir).mkdir(parents=True, exist_ok=True)
@@ -625,363 +714,171 @@ def run_author_batch(
     sec_user_id, resolved_source = _resolve_author_sec_user_id(opener, source_url, timeout)
     existing_index = _load_existing_index(output_dir)
     existing_aweme_index = _load_existing_aweme_index(output_dir)
-    resume_state = {} if overwrite else _load_author_resume(output_dir, sec_user_id)
-    cursor = resume_state.get("cursor", 0) or 0
-    if start_cursor is not None:
-        cursor = start_cursor
-    if _ignore_resume_seen:
-        seen = _rebuild_seen_from_downloads(output_dir)
-    else:
-        seen = set(str(item) for item in (resume_state.get("seen_aweme_ids") or []) if str(item).strip())
-    nickname = str(resume_state.get("author_nickname") or "").strip()
+    nickname = ""
     rows = []
-    total = max_items if max_items > 0 else 0
     processed_new = 0
+    cursor = 0
+    api_total_items = 0
+    seen_aweme_ids: set[str] = set()
 
-    if resume_state:
-        _emit(
-            progress_callback,
-            "log",
-            0,
-            total,
-            {"message": f"检测到断点记录，已从上次 cursor 继续。"},
-        )
+    start_ts = _parse_date_start(date_start)  # inclusive, None if not set
+    end_ts = _parse_date_end(date_end)        # inclusive end-of-day, None if not set
 
-    retry_queue = [item for item in (resume_state.get("failed_aweme_ids") or []) if str(item).strip()]
-    retry_queue = list(dict.fromkeys(str(item) for item in retry_queue if str(item).strip()))
-    if retry_queue:
-        _emit(
-            progress_callback,
-            "log",
-            0,
-            total,
-            {"message": f"检测到 {len(retry_queue)} 条上次失败的作品，先重试。"},
-        )
-    failed_set = set(retry_queue)
-
-    for aweme_id in list(retry_queue):
-        if max_items and processed_new >= max_items:
-            break
-        share_url = f"https://www.douyin.com/video/{aweme_id}"
-        item_index = processed_new + 1
-        _emit(progress_callback, "start", item_index, max_items or 0, {"url": share_url})
-        _emit(
-            progress_callback,
-            "log",
-            item_index,
-            max_items or 0,
-            {"message": "正在重试上次失败作品"},
-        )
-        result, chosen_mode = _download_with_fallback(
-            share_url=share_url,
-            output_dir=output_dir,
-            browser_name=browser_name,
-            browser_profile=browser_profile,
-            retries=retries,
-            timeout=timeout,
-            overwrite=overwrite,
-            progress_callback=progress_callback,
-            index=item_index,
-            total=max_items or 0,
-            existing_index=existing_index,
-            primary_mode="douyin_media",
-        )
-        result["url"] = share_url
-        result["id"] = aweme_id
-        if result.get("status") in {"ok", "skipped"}:
-            failed_set.discard(aweme_id)
-            seen.add(aweme_id)
-            processed_new += 1
-            if result.get("status") == "ok" and aweme_id:
-                marker = result.get("dir") or result.get("path") or ""
-                if marker:
-                    existing_aweme_index[aweme_id] = Path(marker)
-        else:
-            result["note"] = result.get("note") or "上次失败的作品本次仍未成功。"
-        rows.append(_row_from_result(resolved_source, sec_user_id, nickname, "douyin_media", result))
-        _emit(progress_callback, "finish", item_index, max_items or 0, result)
-        _save_author_resume(
-            output_dir,
-            {
-                "source_url": source_url,
-                "resolved_source": resolved_source,
-                "sec_user_id": sec_user_id,
-                "author_nickname": nickname,
-                "cursor": cursor,
-                "seen_aweme_ids": sorted(seen),
-                "failed_aweme_ids": sorted(failed_set),
-            },
-        )
+    range_desc = _format_date_range(start_ts, end_ts)
+    if max_items > 0:
+        _emit(progress_callback, "log", 0, 0, {"message": f"最多下载 {max_items} 条新作品。"})
+    elif range_desc:
+        _emit(progress_callback, "log", 0, 0, {"message": f"下载日期范围: {range_desc}"})
+    else:
+        _emit(progress_callback, "log", 0, 0, {"message": "下载全部作品。"})
 
     while True:
-        if max_items and processed_new >= max_items:
-            break
-
-        page_cursor = cursor
         try:
-            payload = _fetch_author_page(opener, sec_user_id, page_cursor, page_count, timeout)
+            payload = _fetch_author_page(opener, sec_user_id, cursor, page_count, timeout)
         except (ValueError, urllib.error.URLError, urllib.error.HTTPError, OSError) as exc:
-            _emit(
-                progress_callback,
-                "log",
-                0,
-                total,
-                {"message": f"作者作品列表接口请求失败：{exc}"},
-            )
+            _emit(progress_callback, "log", 0, 0, {"message": f"作者作品列表接口请求失败：{exc}"})
             break
         aweme_list = payload.get("aweme_list") or []
         if not aweme_list:
             break
 
+        api_total_items += len(aweme_list)
         next_cursor = payload.get("max_cursor")
         has_more = bool(payload.get("has_more"))
+        past_date_range = False
+        _emit(progress_callback, "log", 0, 0,
+              {"message": f"API 翻页: 本页 {len(aweme_list)} 条，累计 {api_total_items} 条，has_more={has_more}"})
 
         for aweme in aweme_list:
             aweme_id = str(aweme.get("aweme_id") or "").strip()
             if not aweme_id:
                 continue
+            seen_aweme_ids.add(aweme_id)
             author = aweme.get("author") or {}
             if not nickname:
                 nickname = author.get("nickname") or ""
+            create_time = aweme.get("create_time")
             share_url = _aweme_share_url(aweme)
             detected_mode = _aweme_detected_mode(aweme)
+
+            # Date range filter (API returns newest first)
+            if start_ts and create_time:
+                try:
+                    if int(create_time) < start_ts:
+                        past_date_range = True
+                        break
+                except (TypeError, ValueError):
+                    pass
+            if end_ts and create_time:
+                try:
+                    if int(create_time) > end_ts:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
+            # Skip already downloaded
             existing_path = existing_aweme_index.get(aweme_id)
             if not existing_path and detected_mode == "video" and not overwrite:
                 matched_video = _locate_existing_video_file(output_dir, aweme)
                 if matched_video:
                     existing_aweme_index[aweme_id] = matched_video
                     existing_path = matched_video
-
-            if aweme_id in seen or (existing_path and not overwrite):
-                result = {
-                    "url": share_url,
-                    "id": aweme_id,
-                    "status": "skipped",
-                    "path": str(existing_path or ""),
-                    "dir": str(existing_path) if existing_path and Path(existing_path).is_dir() else "",
-                    "note": "该作品已下载过，已跳过重复下载。",
-                }
-                rows.append(_row_from_result(resolved_source, sec_user_id, nickname, detected_mode, result))
+            if existing_path and not overwrite:
+                rows.append({
+                    "source": resolved_source, "author_sec_user_id": sec_user_id,
+                    "author_nickname": nickname, "url": share_url, "aweme_id": aweme_id,
+                    "detected_mode": detected_mode, "status": "skipped",
+                    "path": str(existing_path), "dir": "", "publish_time": "",
+                    "title": "", "kind": "", "image_count": 0, "motion_count": 0,
+                    "audio_path": "", "video_path": "", "ext": "", "extractor": "",
+                    "note": "已下载过，已跳过。",
+                })
                 continue
 
+            # Download
             item_index = processed_new + 1
-            _emit(progress_callback, "start", item_index, max_items or 0, {"url": share_url})
-            _emit(
-                progress_callback,
-                "log",
-                item_index,
-                max_items or 0,
-                {"message": f"已识别作品类型: {'图文 / 动图' if detected_mode == 'douyin_media' else '视频'}"},
-            )
+            _emit(progress_callback, "start", item_index, 0, {"url": share_url})
+            _emit(progress_callback, "log", item_index, 0,
+                  {"message": f"作品类型: {'图文 / 动图' if detected_mode == 'douyin_media' else '视频'}"})
 
             result, chosen_mode = _download_with_fallback(
-                share_url=share_url,
-                output_dir=output_dir,
-                browser_name=browser_name,
-                browser_profile=browser_profile,
-                retries=retries,
-                timeout=timeout,
-                overwrite=overwrite,
-                progress_callback=progress_callback,
-                index=item_index,
-                total=max_items or 0,
-                existing_index=existing_index,
-                primary_mode=detected_mode,
+                share_url=share_url, output_dir=output_dir,
+                browser_name=browser_name, browser_profile=browser_profile,
+                retries=retries, timeout=timeout, overwrite=overwrite,
+                progress_callback=progress_callback, index=item_index, total=0,
+                existing_index=existing_index, primary_mode=detected_mode,
             )
             if result.get("status") == "failed":
                 result["note"] = _failure_note(chosen_mode, result.get("note", ""))
-                _emit(progress_callback, "finish", item_index, max_items or 0, result)
-
+                _emit(progress_callback, "finish", item_index, 0, result)
             if result.get("status") in {"ok", "skipped"}:
-                seen.add(aweme_id)
-                failed_set.discard(aweme_id)
                 processed_new += 1
             if result.get("status") == "ok" and aweme_id:
                 marker = result.get("dir") or result.get("path") or ""
                 if marker:
                     existing_aweme_index[aweme_id] = Path(marker)
-            rows.append(_row_from_result(resolved_source, sec_user_id, nickname, detected_mode, result))
-            if result.get("status") == "failed" and aweme_id:
-                failed_set.add(aweme_id)
-            if aweme_id and result.get("status") in {"ok", "skipped"}:
-                _save_author_resume(
-                    output_dir,
-                    {
-                        "source_url": source_url,
-                        "resolved_source": resolved_source,
-                        "sec_user_id": sec_user_id,
-                        "author_nickname": nickname,
-                        "cursor": page_cursor,
-                        "seen_aweme_ids": sorted(seen),
-                        "failed_aweme_ids": sorted(failed_set),
-                    },
-                )
-            elif aweme_id and result.get("status") == "failed":
-                _save_author_resume(
-                    output_dir,
-                    {
-                        "source_url": source_url,
-                        "resolved_source": resolved_source,
-                        "sec_user_id": sec_user_id,
-                        "author_nickname": nickname,
-                        "cursor": page_cursor,
-                        "seen_aweme_ids": sorted(seen),
-                        "failed_aweme_ids": sorted(failed_set),
-                    },
-                )
-
+            rows.append(_row_from_result(resolved_source, sec_user_id, nickname, chosen_mode, result))
             if max_items and processed_new >= max_items:
                 break
 
         if max_items and processed_new >= max_items:
             break
-        if next_cursor in (None, page_cursor):
+        if past_date_range:
+            _emit(progress_callback, "log", 0, 0, {"message": "已扫描到日期范围之外，停止翻页。"})
+            break
+        if next_cursor in (None, cursor):
             break
         cursor = next_cursor
-        if seen:
-            _save_author_resume(
-                output_dir,
-                {
-                    "source_url": source_url,
-                    "resolved_source": resolved_source,
-                    "sec_user_id": sec_user_id,
-                    "author_nickname": nickname,
-                    "cursor": cursor,
-                    "seen_aweme_ids": sorted(seen),
-                    "failed_aweme_ids": sorted(failed_set),
-                },
-            )
         if not has_more:
             break
 
-    all_skipped = all(row.get("status") == "skipped" for row in rows) if rows else False
-    should_trigger_browser = force_browser_fallback or not rows or all_skipped
-    if should_trigger_browser:
-        if (resume_state or cursor) and not _recovery_attempted and not overwrite:
-            _emit(
-                progress_callback,
-                "log",
-                0,
-                total,
-                {"message": "当前断点已经跑到末尾，正在从头补扫一次漏掉的作品。"},
-            )
-            return run_author_batch(
-                source_url=source_url,
-                output_dir=output_dir,
-                manifest_path=manifest_path,
-                browser_name=browser_name,
-                browser_profile=browser_profile,
-                retries=retries,
-                timeout=timeout,
-                overwrite=overwrite,
-                progress_callback=progress_callback,
-                page_count=page_count,
-                max_items=max_items,
-                start_cursor=0,
-                _recovery_attempted=True,
-                _ignore_resume_seen=True,
-                force_browser_fallback=force_browser_fallback,
-            )
-        if not overwrite:
-            recovered_seen = _rebuild_seen_from_downloads(output_dir)
-            try:
-                author_page_url = f"https://www.douyin.com/user/{sec_user_id}"
-                browser_aweme_items = _collect_browser_aweme_ids(
-                    author_page_url,
-                    timeout=timeout,
-                    max_items=max_items or 0,
-                    progress_callback=progress_callback,
-                )
-            except Exception as exc:
-                _emit(
-                    progress_callback,
-                    "log",
-                    0,
-                    total,
-                    {"message": f"浏览器回补未启用：{exc}"},
-                )
-            else:
-                missing_aweme_items = [item for item in browser_aweme_items if item["id"] not in recovered_seen]
-                if missing_aweme_items:
-                    _emit(
-                        progress_callback,
-                        "log",
-                        0,
-                        total,
-                        {"message": f"浏览器回补发现 {len(missing_aweme_items)} 条疑似漏掉的作品，开始补下。"},
-                    )
-                    browser_rows = []
-                    for item in missing_aweme_items:
-                        aweme_id = item["id"]
-                        link_type = item["type"]
-                        if max_items and processed_new >= max_items:
-                            break
-                        if link_type == "note":
-                            share_url = f"https://www.douyin.com/note/{aweme_id}"
-                            primary_mode = "douyin_media"
-                        else:
-                            share_url = f"https://www.douyin.com/video/{aweme_id}"
-                            primary_mode = "video"
-                        item_index = processed_new + 1
-                        _emit(progress_callback, "start", item_index, max_items or 0, {"url": share_url})
+    _emit(progress_callback, "log", 0, 0,
+          {"message": f"API 阶段完成：累计看到 {len(seen_aweme_ids)} 条作品，"
+                      f"新下载 {processed_new} 条。"})
+
+    # Browser fallback: discover any aweme_ids the API missed.
+    if seen_aweme_ids and not max_items:
+        try:
+            existing_aweme_ids = set(existing_aweme_index.keys())
+            browser_ids = _collect_browser_aweme_ids(
+                sec_user_id, browser_name, browser_profile, progress_callback)
+            if browser_ids:
+                missing = browser_ids - seen_aweme_ids - existing_aweme_ids
+                _emit(progress_callback, "log", 0, 0,
+                      {"message": f"浏览器回补：页面发现 {len(browser_ids)} 条，"
+                                  f"API 未返回 {len(missing)} 条。"})
+                if missing:
+                    for aid in sorted(missing):
+                        share_url = f"https://www.douyin.com/video/{aid}"
+                        _emit(progress_callback, "log", 0, 0,
+                              {"message": f"回补下载: {aid}"})
                         result, chosen_mode = _download_with_fallback(
-                            share_url=share_url,
-                            output_dir=output_dir,
-                            browser_name=browser_name,
-                            browser_profile=browser_profile,
-                            retries=retries,
-                            timeout=timeout,
-                            overwrite=overwrite,
+                            share_url=share_url, output_dir=output_dir,
+                            browser_name=browser_name, browser_profile=browser_profile,
+                            retries=retries, timeout=timeout, overwrite=overwrite,
                             progress_callback=progress_callback,
-                            index=item_index,
-                            total=max_items or 0,
+                            index=processed_new + 1, total=0,
                             existing_index=existing_index,
-                            primary_mode=primary_mode,
+                            primary_mode="video",
                         )
-                        result["url"] = share_url
-                        result["id"] = aweme_id
                         if result.get("status") == "failed":
                             result["note"] = _failure_note(chosen_mode, result.get("note", ""))
-                            _emit(progress_callback, "finish", item_index, max_items or 0, result)
-                            failed_set.add(aweme_id)
-                        else:
-                            seen.add(aweme_id)
-                            failed_set.discard(aweme_id)
+                            _emit(progress_callback, "finish", processed_new + 1, 0, result)
+                        if result.get("status") in {"ok", "skipped"}:
                             processed_new += 1
+                        if result.get("status") == "ok":
                             marker = result.get("dir") or result.get("path") or ""
                             if marker:
-                                existing_aweme_index[aweme_id] = Path(marker)
-                        browser_rows.append(_row_from_result(resolved_source, sec_user_id, nickname, chosen_mode, result))
-                    if browser_rows:
-                        rows.extend(browser_rows)
-                        write_manifest(manifest_path, rows)
-                        summary = summarize_rows(rows)
-                        _save_author_resume(
-                            output_dir,
-                            {
-                                "source_url": source_url,
-                                "resolved_source": resolved_source,
-                                "sec_user_id": sec_user_id,
-                                "author_nickname": nickname,
-                                "cursor": cursor,
-                                "seen_aweme_ids": sorted(seen),
-                                "failed_aweme_ids": sorted(failed_set),
-                            },
-                        )
-                        _emit(progress_callback, "summary", processed_new, max_items or processed_new, summary)
-                        return rows, summary
-        _emit(
-            progress_callback,
-            "log",
-            0,
-            total,
-            {"message": "没有更多作品可继续抓取。"},
-        )
-        summary = summarize_rows(rows)
-        _emit(progress_callback, "summary", processed_new, max_items or processed_new, summary)
-        return rows, summary
+                                existing_aweme_index[aid] = Path(marker)
+                        rows.append(_row_from_result(source_url, sec_user_id, nickname,
+                                                     chosen_mode, result))
+                    _emit(progress_callback, "log", 0, 0,
+                          {"message": f"浏览器回补完成，补充处理 {len(missing)} 条。"})
+        except Exception as exc:
+            _emit(progress_callback, "log", 0, 0,
+                  {"message": f"浏览器回补失败（不影响已下载内容）：{exc}"})
 
     write_manifest(manifest_path, rows)
     summary = summarize_rows(rows)
-    _emit(progress_callback, "summary", processed_new, max_items or processed_new, summary)
+    _emit(progress_callback, "summary", processed_new, processed_new, summary)
     return rows, summary
